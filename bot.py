@@ -69,8 +69,22 @@ async def get_top_symbols(session: aiohttp.ClientSession, top_n: int) -> list[st
     """Тягне список USDT-перпетуальних пар, відсортованих за абсолютною зміною ціни за 24г."""
     url = f"{BYBIT_REST_URL}/v5/market/tickers"
     params = {"category": "linear"}
-    async with session.get(url, params=params) as resp:
-        data = await resp.json()
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; VolumeSpikeBot/1.0)"}
+
+    async with session.get(url, params=params, headers=headers) as resp:
+        raw = await resp.text()
+        if resp.status != 200:
+            log.error(f"Bybit API повернув статус {resp.status}. Тіло відповіді: {raw[:500]}")
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            log.error(f"Bybit API повернув не-JSON відповідь (перші 500 символів): {raw[:500]}")
+            return []
+
+    if data.get("retCode") != 0:
+        log.error(f"Bybit API повернув помилку: retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+        return []
 
     tickers = data.get("result", {}).get("list", [])
     usdt_perp = [t for t in tickers if t["symbol"].endswith("USDT")]
@@ -199,10 +213,12 @@ async def run_ws_connection(
 
 async def main() -> None:
     async with aiohttp.ClientSession() as session:
-        symbols = await get_top_symbols(session, TOP_N_PAIRS)
-        if not symbols:
-            log.error("Не вдалося отримати список пар. Завершення.")
-            return
+        symbols: list[str] = []
+        while not symbols:
+            symbols = await get_top_symbols(session, TOP_N_PAIRS)
+            if not symbols:
+                log.error("Не вдалося отримати список пар. Повтор через 15с...")
+                await asyncio.sleep(15)
 
         states: dict[str, SymbolState] = {}
 
